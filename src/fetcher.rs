@@ -6,6 +6,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
@@ -47,8 +48,8 @@ impl DataFetcher {
             info!("开始获取数据中心 {} 的数据", center.name);
 
             match self.fetch_center_data(&center.name, &center.url, &center.secret_key, &db).await {
-                Ok(count) => info!("公司 {} 获取数据 {} 条", center.name, count),
-                Err(e) => error!("公司 {} 获取失败: {}", center.name, e),
+                Ok(count) => info!("中心 {} 获取数据 {} 条", center.name, count),
+                Err(e) => error!("公司 {} 获取失败: {:#?}\nBacktrace: {:?}", center.name, e, e.backtrace())
             }
         }
         Ok(())
@@ -67,38 +68,77 @@ impl DataFetcher {
         let response = self.client.get(&dataset_list_url)
             .headers(headers.clone())
             .send()
-            .await?;
+            .await
+            .with_context(|| format!("{} 获取数据集列表失败", name))?;
 
-        let dataset_ids: Vec<String> = response.json::<Value>().await?
+        let all_dataset_ids: Vec<String> = response.json::<Value>().await?
             .as_array()
-            .context("响应不是数组")?
+            .with_context(|| format!("{} 响应不是数组", name))?
             .iter()
             .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
             .collect();
 
-        info!("获取到 {} 个数据集ID", dataset_ids.len());
+        let processed_ids: HashSet<String> = db.get_processed_ids(name).await
+            .with_context(|| format!("{} 获取已处理ID列表失败", name))?
+            .into_iter()
+            .collect();
 
+        let new_ids: Vec<String> = all_dataset_ids
+            .into_iter()
+            .filter(|id| !processed_ids.contains(id))
+            .collect();
+
+        info!("获取到 {} 个数据集ID，其中新增 {} 个", processed_ids.len() + new_ids.len(), new_ids.len());
+        if new_ids.is_empty() {
+            return Ok(0);
+        }
+        let existing_new_ids: HashSet<String> = db.check_existing_ids(name, &new_ids).await
+            .with_context(|| format!("{} 检查已存在ID失败", name))?
+            .into_iter()
+            .collect();
+
+        let truly_new_ids: Vec<String> = new_ids
+            .into_iter()
+            .filter(|id| !existing_new_ids.contains(id))
+            .collect();
+
+        info!("过滤后实际需要保存的新ID数量: {}", truly_new_ids.len());
+
+        if truly_new_ids.is_empty() {
+            info!("{} 没有真正需要保存的新ID", name);
+            return Ok(0);
+        }
+        db.save_new_dataset_ids(name, &truly_new_ids).await
+            .with_context(|| format!("{} 保存数据集ID失败", name))?;
         let details_url = token_info.services.iter()
             .find(|s| s.name == "GET_DATASET_DETAILS")
-            .context("未找到GET_DATASET_DETAILS服务")?
+            .with_context(|| format!("{} 未找到GET_DATASET_DETAILS服务", name))?
             .url.clone();
 
+        info!("开始获取数据集详情：{}", &details_url);
+
         let mut count = 0;
-        for id in dataset_ids {
+        for id in &truly_new_ids {
             let response = self.client.get(&details_url)
                 .headers(headers.clone())
                 .query(&[("id", &id)])
                 .send()
-                .await?;
+                .await
+                .with_context(|| format!("{} 获取数据集 {} 详情失败", name, id))?;
 
             if response.status().is_success() {
-                let mut dataset: Dataset = response.json().await?;
-                dataset.sync_date = Utc::now();
-                dataset.center_name = name.to_string();
-                db.upsert_dataset(name, dataset).await?;
+                let dataset: Dataset = response.json().await
+                    .with_context(|| format!("{} 解析数据集 {} 详情失败", name, id))?;
+                db.upsert_dataset(name, dataset).await
+                    .with_context(|| format!("{} 保存数据集 {} 失败", name, id))?;
                 count += 1;
+            } else {
+                error!("{} 获取数据集 {} 详情失败，HTTP状态码: {}", name, id, response.status());
             }
         }
+
+        db.update_processed_ids(name, &truly_new_ids).await
+            .with_context(|| format!("{} 更新已处理ID状态失败", name))?;
         Ok(count)
     }
 

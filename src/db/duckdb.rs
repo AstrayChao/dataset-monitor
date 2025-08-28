@@ -26,13 +26,21 @@ impl DuckDB {
                 check_time TIMESTAMP NOT NULL,
                 status INTEGER DEFAULT 0,
                 error_msg VARCHAR,
-                INDEX idx_center (center_name),
-                INDEX idx_check_time (check_time),
-                INDEX idx_status (status)
             )",
             [],
         )?;
-
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_center ON dataset_monitor (center_name)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_check_time ON dataset_monitor (check_time)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_status ON dataset_monitor (status)",
+            [],
+        )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })

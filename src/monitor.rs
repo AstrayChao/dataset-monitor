@@ -30,9 +30,9 @@ impl DataMonitor {
 
         let mut all_datasets = Vec::new();
 
-        for company in &self.config.centers {
-            let datasets = mongo.get_datasets(&company.name).await?;
-            info!("公司 {} 有 {} 个数据集", company.name, datasets.len());
+        for center in &self.config.centers {
+            let datasets = mongo.get_datasets(&center.name).await?;
+            info!("数据中心 {} 有 {} 个数据集", center.name, datasets.len());
             all_datasets.extend(datasets);
         }
         info!("总共需要监测 {} 个数据集", all_datasets.len());
@@ -88,9 +88,9 @@ impl DataMonitor {
             raw_id: dataset.raw_id.clone(),
             url,
             name: dataset.extract_name(),
-            center_name: dataset.center_name.clone(),
+            center_name: dataset.center_name.clone()?,
             date_published: dataset.extract_date_published(),
-            sync_date: dataset.sync_date,
+            sync_date: dataset.sync_date?,
             check_time: Utc::now(),
             status: 0,
             error_msg: None,

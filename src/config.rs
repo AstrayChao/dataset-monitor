@@ -13,6 +13,7 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Center {
     pub name: String,
+    #[serde(rename = "secretKey")]
     pub secret_key: String,
     pub url: String,
 }

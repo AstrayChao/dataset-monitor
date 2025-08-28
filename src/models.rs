@@ -29,18 +29,18 @@ pub struct Dataset {
     pub _id: Option<ObjectId>,
     #[serde(rename = "@id")]
     pub raw_id: String,
-    #[serde(rename = "@type")]
-    pub data_type: Bson,
+    #[serde(rename = "@type", default)]
+    pub data_type: Option<Bson>,
     #[serde(rename = "schema:url")]
     pub url: Option<Bson>,
-    #[serde(rename = "schema:name")]
+    #[serde(rename = "schema:name", default)]
     pub name: Option<Bson>,
-    #[serde(rename = "schema:datePublished")]
+    #[serde(rename = "schema:datePublished", default)]
     pub date_published: Option<Bson>,
-    #[serde(rename = "syncDate")]
-    pub sync_date: DateTime<Utc>,
-    #[serde(rename = "centerName")]
-    pub center_name: String,
+    #[serde(rename = "syncDate", default)]
+    pub sync_date: Option<DateTime<Utc>>,
+    #[serde(rename = "centerName", default)]
+    pub center_name: Option<String>,
 }
 
 #[derive(Debug)]
@@ -67,7 +67,6 @@ impl Dataset {
 
     pub fn extract_name(&self) -> String {
         match &self.name {
-            _ => "Unknown".to_string(),
             Some(Bson::String(s)) => s.clone(),
             Some(Bson::Document(doc)) => {
                 doc.get("@value")
@@ -85,6 +84,7 @@ impl Dataset {
                     })
                     .unwrap_or_else(|| "unknown".to_string())
             }
+            _ => "Unknown".to_string(),
         }
     }
 
