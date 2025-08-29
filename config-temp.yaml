@@ -15,4 +15,3 @@ monitor:
   check_interval_days: 7
   http_timeout_secs: 15
   max_concurrent: 32
-  retry_times: 1

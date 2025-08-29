@@ -35,7 +35,6 @@ pub struct MonitorConfig {
     pub check_interval_days: u32,
     pub http_timeout_secs: u64,
     pub max_concurrent: usize,
-    pub retry_times: u32,
 }
 
 impl Config {

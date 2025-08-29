@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clokwerk::{AsyncScheduler, TimeUnits};
+use mongodb::bson::{doc, Document};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
@@ -10,6 +11,8 @@ mod db;
 mod fetcher;
 mod monitor;
 
+use crate::config::MongoDBConfig;
+use crate::db::mongodb::MongoDB;
 use config::Config;
 use fetcher::DataFetcher;
 use monitor::DataMonitor;
@@ -47,6 +50,7 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
+
 
 fn init_logging() -> Result<()> {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
