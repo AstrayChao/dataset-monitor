@@ -28,8 +28,10 @@ pub struct Service {
 pub struct Dataset {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     pub _id: Option<ObjectId>,
-    #[serde(rename = "@id")]
+    #[serde(rename = "@id", default)]
     pub raw_id: String,
+    #[serde(rename = "casdc_id", default)]
+    pub casdc_id: Option<String>,
     #[serde(rename = "@type", default)]
     pub data_type: Option<Bson>,
     #[serde(rename = "schema:url")]

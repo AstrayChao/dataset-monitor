@@ -37,6 +37,22 @@ impl MongoDB {
         Ok(())
     }
 
+    pub async fn get_dataset_by_center(&self, center_name: &str) -> Result<Vec<String>> {
+        let filter = doc! {
+            "center_name": center_name
+        };
+
+        let cursor = self.database.collection::<Document>("processed_dataset_ids").find(filter).await?;
+
+        let existing_docs: Vec<Document> = cursor.try_collect().await?;
+
+        let existing_ids: Vec<String> = existing_docs.into_iter()
+            .filter_map(|doc| doc.get_str("dataset_id").ok().map(String::from))
+            .collect();
+
+        Ok(existing_ids)
+    }
+
     pub async fn get_datasets(&self, collection_name: &str) -> Result<Vec<Dataset>> {
         let collection: Collection<Dataset> = self.database.collection(collection_name);
 
@@ -113,6 +129,25 @@ impl MongoDB {
         }
 
         Ok(processed_ids)
+    }
+
+    pub async fn get_unprocessed_ids(&self, center_name: &str) -> Result<Vec<String>> {
+        let collection = self.database
+            .collection::<Document>("processed_dataset_ids");
+        let filter = doc! {
+                "center_name": center_name,
+                "status": "pending"
+            };
+        let mut cursor = collection.find(filter).await?;
+        let mut unprocessed_ids = Vec::new();
+
+        while let Some(doc) = cursor.try_next().await? {
+            if let Some(dataset_id) = doc.get("dataset_id").and_then(|id| id.as_str()) {
+                unprocessed_ids.push(dataset_id.to_string());
+            }
+        }
+
+        Ok(unprocessed_ids)
     }
 
     // 更新ID状态为已处理

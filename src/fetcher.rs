@@ -33,6 +33,8 @@ impl DataFetcher {
     pub fn new(config: Arc<Config>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.monitor.http_timeout_secs))
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
             .build()
             .expect("failed to build http client");
         Self {
@@ -56,17 +58,30 @@ impl DataFetcher {
     }
 
     async fn fetch_center_data(&self, name: &str, url: &str, secret_key: &str, db: &MongoDB) -> Result<usize> {
+        let discovered = self.discover_new_ids(name, url, secret_key, db).await?;
+        info!("数据中心 {} 本次发现新数据 {} 条", name, discovered);
+
+        // 获取库中 状态为还未处理的数据集(刚发现+历史遗留的)
+        let processed = self.process_pending_datasets(name, url, secret_key, db).await?;
+        info!("数据中心 {} 本次处理数据 {} 条", name, processed);
+
+        Ok(processed)
+    }
+
+    async fn discover_new_ids(&self, name: &str, url: &str, secret_key: &str, db: &MongoDB) -> Result<usize> {
         let token_info = self.get_or_refresh_token(name, url, secret_key).await?;
         let dataset_list_url = token_info.services.iter()
             .find(|s| s.name == "DATASET_LIST")
             .context("未找到数据集服务")?
             .url.clone();
+
         let mut headers = HeaderMap::new();
         headers.insert("token", HeaderValue::from_str(&token_info.token)?);
         headers.insert("version", HeaderValue::from_str(&token_info.version)?);
 
+        // 请求数据集 ID 列表
         let response = self.client.get(&dataset_list_url)
-            .headers(headers.clone())
+            .headers(headers)
             .send()
             .await
             .with_context(|| format!("{} 获取数据集列表失败", name))?;
@@ -78,47 +93,49 @@ impl DataFetcher {
             .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
             .collect();
 
-        let processed_ids: HashSet<String> = db.get_processed_ids(name).await
-            .with_context(|| format!("{} 获取已处理ID列表失败", name))?
+        // DB 已有的 ID（不管是否 processed）
+        let existing_ids: HashSet<String> = db.get_dataset_by_center(name).await?
             .into_iter()
             .collect();
 
+        // 过滤掉 DB 已有的，剩下的才是全新 ID
         let new_ids: Vec<String> = all_dataset_ids
             .into_iter()
-            .filter(|id| !processed_ids.contains(id))
+            .filter(|id| !existing_ids.contains(id))
             .collect();
 
-        info!("获取到 {} 个数据集ID，其中新增 {} 个", processed_ids.len() + new_ids.len(), new_ids.len());
         if new_ids.is_empty() {
+            info!("{} 没有新 ID", name);
             return Ok(0);
         }
-        let existing_new_ids: HashSet<String> = db.check_existing_ids(name, &new_ids).await
-            .with_context(|| format!("{} 检查已存在ID失败", name))?
-            .into_iter()
-            .collect();
 
-        let truly_new_ids: Vec<String> = new_ids
-            .into_iter()
-            .filter(|id| !existing_new_ids.contains(id))
-            .collect();
-
-        info!("过滤后实际需要保存的新ID数量: {}", truly_new_ids.len());
-
-        if truly_new_ids.is_empty() {
-            info!("{} 没有真正需要保存的新ID", name);
-            return Ok(0);
-        }
-        db.save_new_dataset_ids(name, &truly_new_ids).await
+        // 保存为未处理状态
+        db.save_new_dataset_ids(name, &new_ids).await
             .with_context(|| format!("{} 保存数据集ID失败", name))?;
+
+        info!("{} 发现并保存了 {} 个新 ID", name, new_ids.len());
+        Ok(new_ids.len())
+    }
+
+    async fn process_pending_datasets(&self, name: &str, url: &str, secret_key: &str, db: &MongoDB) -> Result<usize> {
+        let token_info = self.get_or_refresh_token(name, url, secret_key).await?;
         let details_url = token_info.services.iter()
             .find(|s| s.name == "GET_DATASET_DETAILS")
             .with_context(|| format!("{} 未找到GET_DATASET_DETAILS服务", name))?
             .url.clone();
+        let mut headers = HeaderMap::new();
+        headers.insert("token", HeaderValue::from_str(&token_info.token)?);
+        headers.insert("version", HeaderValue::from_str(&token_info.version)?);
 
-        info!("开始获取数据集详情：{}", &details_url);
+        // 查找所有未处理的 ID
+        let pending_ids = db.get_unprocessed_ids(name).await?;
+        if pending_ids.is_empty() {
+            info!("{} 没有待处理的 ID", name);
+            return Ok(0);
+        }
 
         let mut count = 0;
-        for id in &truly_new_ids {
+        for id in pending_ids {
             let response = self.client.get(&details_url)
                 .headers(headers.clone())
                 .query(&[("id", &id)])
@@ -127,18 +144,19 @@ impl DataFetcher {
                 .with_context(|| format!("{} 获取数据集 {} 详情失败", name, id))?;
 
             if response.status().is_success() {
-                let dataset: Dataset = response.json().await
+                let mut dataset: Dataset = response.json().await
                     .with_context(|| format!("{} 解析数据集 {} 详情失败", name, id))?;
+                dataset.casdc_id = Some(id.clone());
                 db.upsert_dataset(name, dataset).await
                     .with_context(|| format!("{} 保存数据集 {} 失败", name, id))?;
+                db.update_processed_ids(name, &[id.clone()]).await?;
                 count += 1;
             } else {
                 error!("{} 获取数据集 {} 详情失败，HTTP状态码: {}", name, id, response.status());
             }
         }
 
-        db.update_processed_ids(name, &truly_new_ids).await
-            .with_context(|| format!("{} 更新已处理ID状态失败", name))?;
+        info!("{} 成功处理 {} 个数据集详情", name, count);
         Ok(count)
     }
 
