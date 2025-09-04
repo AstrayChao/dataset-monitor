@@ -35,6 +35,7 @@ impl DataFetcher {
             .timeout(Duration::from_secs(config.monitor.http_timeout_secs))
             .danger_accept_invalid_certs(true)
             .danger_accept_invalid_hostnames(true)
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .expect("failed to build http client");
         Self {
@@ -44,14 +45,16 @@ impl DataFetcher {
         }
     }
 
-    pub async fn fetch_all_center(&self) -> Result<()> {
-        let db = MongoDB::new(&self.config.mongodb).await?;
+    pub async fn fetch_all_center(&self, db: &MongoDB) -> Result<()> {
         for center in &self.config.centers {
+            if !center.enabled {
+                info!("跳过禁用的 {}", center.name);
+                continue;
+            }
             info!("开始获取数据中心 {} 的数据", center.name);
-
             match self.fetch_center_data(&center.name, &center.url, &center.secret_key, &db).await {
                 Ok(count) => info!("中心 {} 获取数据 {} 条", center.name, count),
-                Err(e) => error!("公司 {} 获取失败: {:#?}\nBacktrace: {:?}", center.name, e, e.backtrace())
+                Err(e) => error!("中心 {} 获取失败: {:#?}\nBacktrace: {:?}", center.name, e, e.backtrace())
             }
         }
         Ok(())
@@ -79,16 +82,39 @@ impl DataFetcher {
         headers.insert("token", HeaderValue::from_str(&token_info.token)?);
         headers.insert("version", HeaderValue::from_str(&token_info.version)?);
 
+        let method = match name {
+            n if n.contains("海洋科学") || n.contains("微生物") => reqwest::Method::POST,
+            _ => reqwest::Method::GET,
+        };
+
         // 请求数据集 ID 列表
-        let response = self.client.get(&dataset_list_url)
+        let response = self.client.request(method, &dataset_list_url)
             .headers(headers)
             .send()
             .await
             .with_context(|| format!("{} 获取数据集列表失败", name))?;
+        // 检查是否意外重定向到登录页面或其他错误页面
+        let status = response.status();
+        let response_text = response.text().await
+            .with_context(|| format!("{} 读取响应内容失败", name))?;
 
-        let all_dataset_ids: Vec<String> = response.json::<Value>().await?
+        // 检查常见的错误情况
+        if status == 401 || status == 403 {
+            anyhow::bail!("{} 认证失败，HTTP状态码: {}，可能token已过期", name, status);
+        }
+
+        if status.is_redirection() {
+            anyhow::bail!("{} 意外重定向，HTTP状态码: {}，响应内容: {}", name, status, response_text);
+        }
+
+        if status.is_client_error() || status.is_server_error() {
+            anyhow::bail!("{} 请求失败，HTTP状态码: {}，响应内容: {}", name, status, response_text);
+        }
+
+        let all_dataset_ids: Vec<String> = serde_json::from_str::<Value>(&response_text)
+            .with_context(|| format!("{} 响应不是有效的JSON，内容: {}", name, response_text))?
             .as_array()
-            .with_context(|| format!("{} 响应不是数组", name))?
+            .with_context(|| format!("{} 响应不是数组，内容: {}", name, response_text))?
             .iter()
             .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
             .collect();
@@ -116,7 +142,12 @@ impl DataFetcher {
         info!("{} 发现并保存了 {} 个新 ID", name, new_ids.len());
         Ok(new_ids.len())
     }
-
+    fn clean_json_string(input: &str) -> String {
+        input.chars().filter(|&c| {
+            // 允许的字符: 换行符、回车符、制表符以外的控制字符
+            c >= ' ' || c == '\n' || c == '\r' || c == '\t'
+        }).collect()
+    }
     async fn process_pending_datasets(&self, name: &str, url: &str, secret_key: &str, db: &MongoDB) -> Result<usize> {
         let token_info = self.get_or_refresh_token(name, url, secret_key).await?;
         let details_url = token_info.services.iter()
@@ -134,7 +165,9 @@ impl DataFetcher {
             return Ok(0);
         }
 
+        info!("{} 待处理的 ID 数量: {}", name, pending_ids.len());
         let mut count = 0;
+
         for id in pending_ids {
             let response = self.client.get(&details_url)
                 .headers(headers.clone())
@@ -144,8 +177,13 @@ impl DataFetcher {
                 .with_context(|| format!("{} 获取数据集 {} 详情失败", name, id))?;
 
             if response.status().is_success() {
-                let mut dataset: Dataset = response.json().await
-                    .with_context(|| format!("{} 解析数据集 {} 详情失败", name, id))?;
+                let response_text = response.text().await
+                    .with_context(|| format!("{} 读取数据集 {} 响应内容失败", name, id))?;
+                let cleaned_text = Self::clean_json_string(&response_text);
+                let value: Value = serde_json::from_str(&cleaned_text)
+                    .with_context(|| format!("{} 解析数据集 {} 详情失败: {}", name, id, cleaned_text))?;
+                let mut dataset: Dataset = serde_json::from_value(value)
+                    .with_context(|| format!("{} 解析数据集 {} 详情失败: {}", name, id, cleaned_text))?;
                 dataset.casdc_id = Some(id.clone());
                 db.upsert_dataset(name, dataset).await
                     .with_context(|| format!("{} 保存数据集 {} 失败", name, id))?;
@@ -169,18 +207,24 @@ impl DataFetcher {
         }
 
         // 获取新token
-        info!("获取公司 {} 的新token", name);
+        info!("获取中心 {} 的新token", name);
 
         let mut headers = HeaderMap::new();
+
         headers.insert("secretKey", HeaderValue::from_str(key)?);
 
         let response = self.client.get(url)
             .headers(headers)
             .send()
             .await
-            .context("请求token失败")?;
+            .with_context(|| "请求token失败")?;
 
-        let auth_resp: AuthResponse = response.json().await?;
+        let status = response.status();
+        let response_text = response.text().await?;
+        info!("Token response status: {}, body: {}", status, response_text);
+
+        let auth_resp: AuthResponse = serde_json::from_str(&response_text)
+            .with_context(|| format!("解析认证响应失败，响应内容: {}", response_text))?;
 
         let token_info = TokenInfo {
             token: auth_resp.ticket.token,

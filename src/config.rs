@@ -16,6 +16,7 @@ pub struct Center {
     #[serde(rename = "secretKey")]
     pub secret_key: String,
     pub url: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -7,7 +7,7 @@ use tracing::info;
 use crate::models::{ErrorCategoryStats, HealthCheck, MonitorRecord, NetworkIssueTrend, ProblematicUrl, UrlHealthReport};
 
 pub struct DuckDB {
-    conn: Arc<Mutex<Connection>>,
+    pub conn: Arc<Mutex<Connection>>,
 }
 
 impl DuckDB {
@@ -22,7 +22,6 @@ impl DuckDB {
                 name VARCHAR,
                 center_name VARCHAR NOT NULL,
                 date_published VARCHAR,
-                sync_date TIMESTAMP NOT NULL,
                 check_time TIMESTAMP NOT NULL,
                -- HTTP响应信息
                 status_code INTEGER,
@@ -41,18 +40,42 @@ impl DuckDB {
                 headers TEXT,
                 -- 添加创建时间和更新时间
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )",
             [],
         )?;
         let indices = vec![
-            "CREATE INDEX IF NOT EXISTS idx_center ON dataset_monitor (center_name)",
-            "CREATE INDEX IF NOT EXISTS idx_check_time ON dataset_monitor (check_time)",
-            "CREATE INDEX IF NOT EXISTS idx_status_code ON dataset_monitor (status_code)",
-            "CREATE INDEX IF NOT EXISTS idx_error_category ON dataset_monitor (error_category)",
-            "CREATE INDEX IF NOT EXISTS idx_is_local ON dataset_monitor (is_likely_local_issue)",
+            // 主键索引
+            "CREATE INDEX IF NOT EXISTS idx_id ON dataset_monitor (id)",
+
+            // URL相关索引（频繁查询）
             "CREATE INDEX IF NOT EXISTS idx_url ON dataset_monitor (url)",
             "CREATE INDEX IF NOT EXISTS idx_raw_id ON dataset_monitor (raw_id)",
+
+            // 核心分析维度的组合索引（按使用频率和重要性排序）
+
+            // 1. 时间+状态码（最核心的健康检查分析）
+            "CREATE INDEX IF NOT EXISTS idx_check_time_status ON dataset_monitor (check_time, status_code)",
+
+            // 2. 时间+数据中心（按数据中心分析）
+            "CREATE INDEX IF NOT EXISTS idx_check_time_center ON dataset_monitor (check_time, center_name)",
+
+            // 3. 时间+本地问题标识（区分本地/远程问题）
+            "CREATE INDEX IF NOT EXISTS idx_check_time_local_issue ON dataset_monitor (check_time, is_likely_local_issue)",
+
+            // 4. 时间+错误分类（错误类型分析）
+            "CREATE INDEX IF NOT EXISTS idx_check_time_error_category ON dataset_monitor (check_time, error_category)",
+
+            // 5. 多维度组合索引（复杂分析查询）
+            "CREATE INDEX IF NOT EXISTS idx_time_center_status ON dataset_monitor (check_time, center_name, status_code)",
+            "CREATE INDEX IF NOT EXISTS idx_center_status_local ON dataset_monitor (center_name, status_code, is_likely_local_issue)",
+
+            // 单列索引（用于特定查询和辅助过滤）
+            "CREATE INDEX IF NOT EXISTS idx_check_time ON dataset_monitor (check_time)",
+            "CREATE INDEX IF NOT EXISTS idx_status_code ON dataset_monitor (status_code)",
+            "CREATE INDEX IF NOT EXISTS idx_center_name ON dataset_monitor (center_name)",
+            "CREATE INDEX IF NOT EXISTS idx_is_likely_local_issue ON dataset_monitor (is_likely_local_issue)",
+            "CREATE INDEX IF NOT EXISTS idx_error_category ON dataset_monitor (error_category)",
             "CREATE INDEX IF NOT EXISTS idx_response_time ON dataset_monitor (response_time_ms)",
         ];
 
@@ -70,33 +93,37 @@ impl DuckDB {
             return Ok(());
         }
         let conn = self.conn.lock().await;
-        let mut appender = conn.appender("dataset_monitor")?;
-        for record in records {
-            let error_category_str = record.error_category
-                .as_ref()
-                .map(|e| serde_json::to_string(e).unwrap_or_default());
-            appender.append_row(params![
-                        &record.id,
-                        &record.url,
-                        &record.name,
-                        &record.center_name,
-                        &record.date_published,
-                        &record.sync_date.to_rfc3339(),
-                        &record.check_time.to_rfc3339(),
-                        &record.status_code,
-                        &record.status_text,
-                        &error_category_str,
-                        &record.error_msg,
-                        &record.error_detail,
-                        &record.response_time_ms.map(|t| t as i64),
-                        &record.is_likely_local_issue,
-                        &record.headers,
-                        // created_at 使用默认值 CURRENT_TIMESTAMP
-                        &chrono::Utc::now().to_rfc3339(),
-                        &chrono::Utc::now().to_rfc3339()  // updated_at
-                    ])?
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut appender = conn.appender("dataset_monitor")?;
+            for record in records {
+                let error_category_str = record.error_category.clone();
+                let created_at_str = record.created_at.as_ref().map(|dt| dt.to_rfc3339());
+                let updated_at_str = record.updated_at.as_ref().map(|dt| dt.to_rfc3339());
+
+                appender.append_row(params![
+                            &record.id,
+                            &record.raw_id,
+                            &record.url,
+                            &record.name,
+                            &record.center_name,
+                            &record.date_published,
+                            &record.check_time.to_rfc3339(),
+                            &record.status_code,
+                            &record.status_text,
+                            &error_category_str,
+                            &record.error_msg,
+                            &record.error_detail,
+                            &record.response_time_ms.map(|t| t as i64),
+                            &record.is_likely_local_issue,
+                            &record.headers,
+                            &created_at_str,
+                            &updated_at_str
+                        ])?
+            }
+            appender.flush()?;
         }
-        appender.flush()?;
+        tx.commit()?;
         info!("插入 {} 条监测记录", records.len());
         Ok(())
     }
@@ -125,9 +152,7 @@ impl DuckDB {
             )?;
             let mut appender = tx.appender("temp_updates")?;
             for record in records {
-                let error_category_str = record.error_category
-                    .as_ref()
-                    .map(|e| serde_json::to_string(e).unwrap_or_default());
+                let error_category_str = record.error_category.clone();
 
                 appender.append_row(params![
                     &record.id,

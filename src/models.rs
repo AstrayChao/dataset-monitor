@@ -1,8 +1,11 @@
 use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Bson;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::error::Error;
+use std::fmt;
+use std::fmt::Display;
+use tracing::warn;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthResponse {
@@ -23,6 +26,46 @@ pub struct Service {
     pub version: String,
     pub url: String,
 }
+fn deserialize_optional_flexible<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+
+    match value {
+        Some(val) => {
+            match val {
+                serde_json::Value::String(s) => {
+                    // 尝试解析字符串为日期时间
+                    if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
+                        Ok(Some(dt.with_timezone(&Utc)))
+                    } else if let Ok(dt) = DateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S%.3fZ") {
+                        Ok(Some(dt.with_timezone(&Utc)))
+                    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S") {
+                        Ok(Some(DateTime::from_naive_utc_and_offset(dt, Utc)))
+                    } else if let Ok(date) = chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
+                        Ok(Some(DateTime::from_naive_utc_and_offset(
+                            date.and_hms_opt(0, 0, 0).unwrap_or_default(),
+                            Utc,
+                        )))
+                    } else {
+                        // 解析失败，返回 None
+                        warn!("无法解析日期字符串: {}", s);
+                        Ok(None)
+                    }
+                }
+                _ => {
+                    // 非字符串类型，尝试直接解析
+                    match serde_json::from_value::<DateTime<Utc>>(val) {
+                        Ok(dt) => Ok(Some(dt)),
+                        Err(_) => Ok(None),
+                    }
+                }
+            }
+        }
+        None => Ok(None),
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Dataset {
@@ -40,7 +83,11 @@ pub struct Dataset {
     pub name: Option<Bson>,
     #[serde(rename = "schema:datePublished", default)]
     pub date_published: Option<Bson>,
-    #[serde(rename = "syncDate", default)]
+    #[serde(
+        rename = "syncDate",
+        default,
+        deserialize_with = "deserialize_optional_flexible"
+    )]
     pub sync_date: Option<DateTime<Utc>>,
     #[serde(rename = "centerName", default)]
     pub center_name: Option<String>,
@@ -54,15 +101,14 @@ pub struct MonitorRecord {
     pub name: Option<String>,
     pub center_name: String,
     pub date_published: Option<String>,
-    pub sync_date: DateTime<Utc>,
     pub check_time: DateTime<Utc>,
 
     // HTTP响应信息
-    pub status_code: Option<i32>,
+    pub status_code: Option<u16>,
     pub status_text: Option<String>,
 
     // 错误信息
-    pub error_category: Option<ErrorCategory>,
+    pub error_category: Option<String>,
     pub error_msg: Option<String>,
     pub error_detail: Option<String>,
 
@@ -71,6 +117,8 @@ pub struct MonitorRecord {
     // 诊断信息
     pub is_likely_local_issue: bool,
     pub headers: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// 错误分类枚举
@@ -97,7 +145,22 @@ pub enum ErrorCategory {
     /// 未知错误
     Unknown,
 }
-
+impl Display for ErrorCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorCategory::NetworkConnection => write!(f, "NETWORK_ERROR"),
+            ErrorCategory::ConnectionRefused => write!(f, "CONNECTION_REFUSED_ERROR"),
+            ErrorCategory::DnsResolution => write!(f, "DNS_RESOLUTION_ERROR"),
+            ErrorCategory::Timeout => write!(f, "TIMEOUT_ERROR"),
+            ErrorCategory::TooManyRedirects => write!(f, "TOO_MANY_REDIRECTS_ERROR"),
+            ErrorCategory::ServerError => write!(f, "SERVER_ERROR"),
+            ErrorCategory::ClientError => write!(f, "CLIENT_ERROR"),
+            ErrorCategory::Unknown => write!(f, "UNKNOWN_ERROR"),
+            ErrorCategory::SslCertificate => write!(f, "SSL_ERROR"),
+            ErrorCategory::RequestCanceled => write!(f, "REQUEST_CANCELED_ERROR"),
+        }
+    }
+}
 impl ErrorCategory {
     /// 根据reqwest错误判断错误类别
     pub fn from_request_error(e: &reqwest::Error) -> Self {
@@ -200,7 +263,7 @@ pub struct ProblematicUrl {
 }
 #[derive(Debug)]
 pub struct ResponseInfo {
-    pub(crate) status_code: i32,
+    pub(crate) status_code: u16,
     pub(crate) status_text: String,
     pub(crate) headers: Option<String>,
 }
@@ -210,7 +273,7 @@ pub struct CheckError {
     pub(crate) category: ErrorCategory,
     pub(crate) message: String,
     pub(crate) detail: String,
-    pub(crate) status_code: Option<i32>,
+    pub(crate) status_code: Option<u16>,
 }
 impl Dataset {
     pub fn extract_url(&self) -> Option<String> {
