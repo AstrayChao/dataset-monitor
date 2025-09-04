@@ -3,6 +3,16 @@ name = "dataset-monitor"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "data_fetch"
+path = "src/bin/data_fetch.rs"
+
+
+[[bin]]
+name = "data_monitor"
+path = "src/bin/data_monitor.rs"
+
+
 [dependencies]
 tokio = { version = "1.47", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
@@ -20,5 +30,8 @@ tracing-appender = "0.2"
 tracing-log = "0.2"
 futures = "0.3"
 regex = "1.1"
+tokio-cron-scheduler = "0.14.0"
 clokwerk = "0.4"
 dashmap = "6"
+axum = "0.8.4"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
