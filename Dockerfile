@@ -25,9 +25,6 @@ RUN cargo build --release
 
 FROM docker.1ms.run/debian:bullseye-slim
 
-RUN groupadd -g 10001 app && \
-    useradd -u 10001 -g app app
-
 WORKDIR /app
 
 COPY --from=builder --chown=app:app /usr/src/app/target/release/data_fetch ./data_fetch
@@ -36,7 +33,5 @@ COPY --from=builder --chown=app:app /usr/src/app/target/release/data_monitor ./d
 # 复制配置文件
 COPY --chown=app:app ./config.yaml ./config.yaml
 
-USER 10001
+USER root
 
-ENV SERVICE_NAME=data_fetch
-ENTRYPOINT ["/bin/sh", "-c", "./$SERVICE_NAME"]

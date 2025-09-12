@@ -47,7 +47,7 @@ impl DataFetcher {
 
     pub async fn fetch_all_center(&self, db: &MongoDB) -> Result<()> {
         for center in &self.config.centers {
-            if !center.enabled {
+            if !center.enabled || (center.name != "中国科学院干细胞与再生医学科学数据中心") {
                 info!("跳过禁用的 {}", center.name);
                 continue;
             }

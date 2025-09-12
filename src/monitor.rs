@@ -136,7 +136,7 @@ impl DataMonitor {
     }
 
     async fn check_url(&self, client: &reqwest::Client, url: &str) -> Result<ResponseInfo, CheckError> {
-        match client.head(url).header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+        match client.get(url).header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
                               AppleWebKit/537.36 (KHTML, like Gecko) \
                               Chrome/127.0.0.0 Safari/537.36")
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")

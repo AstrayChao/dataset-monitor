@@ -9,3 +9,6 @@ target/
 logs/
 
 .env*
+report.md
+
+config-temp.yaml

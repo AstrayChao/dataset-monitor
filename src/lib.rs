@@ -3,7 +3,6 @@ pub mod models;
 pub mod db;
 pub mod fetcher;
 pub mod monitor;
-pub mod api;
 
 // 重新导出常用的类型和函数
 pub use crate::config::Config;
